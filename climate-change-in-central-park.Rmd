@@ -1,0 +1,158 @@
+---
+title: "Climate Change in Central Park"
+author: "Giovanni Colitti"
+date: "6/27/2020"
+output: github_document
+---
+
+```{r load-packages, message=FALSE, warning=FALSE, include=FALSE}
+# uncomment next line to install required packages
+# install.packages(c("lubridate", "snakecase", "tidyverse"))
+
+library(lubridate)
+library(snakecase)
+library(tidyverse)
+```
+
+A friend of mine mentioned during a hike that there seemed to be no relationship between the 
+central park temperature data and carbon dioxide emissions (otherwise known as global warming or 
+climate change) after accounting for seasonality. I was deeply skeptical and wanted to take a look
+myself.
+
+# Clean data
+```{r clean-data}
+# Load central park temp data and reshape long
+cp_temp <- read_csv("raw-data/central-park-temp-1869-2018.csv") %>%
+  set_names(to_snake_case(names(.))) %>%
+  pivot_longer(cols = jan:dec,
+               names_to = "month",
+               values_to = "temp_f_avg") %>% 
+  mutate(
+    month = match(month, tolower(month.abb)),
+    date = make_date(
+      year = year,
+      month = month,
+      day = days_in_month(make_date(year = year, month = month)) / 2 # get average day for each month
+    )
+  ) %>%
+  select(-c(year, month))
+
+glimpse(cp_temp)
+
+# Load mauna loa co2 data
+ml_co2 <- read_csv("raw-data/mauna-loa-co2-1958-2020.csv") %>%
+  mutate(
+    date = make_date(
+      year = year,
+      month = month,
+      day = days_in_month(make_date(year = year, month = month)) / 2
+    ),
+    average = if_else(average == -99.99, interpolated, average)
+  ) %>%
+  select(date, average) %>%
+  rename(co2_ppm_avg = average) 
+
+glimpse(ml_co2)
+
+```
+
+# Visualize Central Park Temperature Data
+```{r plot-cp-temp-monthly}
+cp_temp %>% 
+  ggplot(aes(x = date, y = temp_f_avg)) +
+  geom_point() +
+  geom_line() +
+  geom_smooth(method = "loess") +
+  ylab("Temp (F)") +
+  xlab("Date") +
+  ggtitle("NY Central Park Monthly Avg Temperature, 1869-2020")
+```
+
+This graph shows a large seasonal fluctuation in temperature relative to the
+linear trend in temperature (I think this may have been what my friend was actually referring to). 
+However, it's still possible to see that mean temperatures are
+increasing over time.
+
+```{r plot-cp-temp-annual}
+cp_temp %>% 
+  group_by(year(date)) %>%
+  summarise_all(mean) %>%
+  ungroup() %>%
+  ggplot(aes(x = date, y = temp_f_avg)) +
+  geom_point() +
+  geom_line() +
+  geom_smooth(method = "loess") +
+  ylab("Temp (F)") +
+  xlab("Date") +
+  ggtitle("NY Central Park Annual Avg Temperature, 1869-2020")
+
+```
+
+# Visualize Mauna Loa Co2 Data
+
+```{r plot-ml-co2-monthly}
+ml_co2 %>% 
+  ggplot(aes(x = date, y = co2_ppm_avg)) +
+  geom_point() +
+  geom_line() +
+  geom_smooth(method = "loess") +
+  ylab("Co2 (ppm)") +
+  xlab("Date") +
+  ggtitle("Mauna Loa Monthly Avg Co2 Concentration, 1958-2020")
+
+```
+
+```{r plot-ml-co2-annual}
+ml_co2 %>% 
+  group_by(year(date)) %>%
+  summarise_all(mean) %>%
+  ungroup() %>%
+  ggplot(aes(x = date, y = co2_ppm_avg)) +
+  geom_point() +
+  geom_line() +
+  ylab("Co2 (ppm)") +
+  xlab("Date") +
+  ggtitle("Mauna Loa Annual Avg Co2 Concentration, 1958-2020")
+```
+
+Looks like Co2 is increasing...
+
+```{r scatter-co2-vs-temp}
+
+d_annual <- ml_co2 %>% 
+  inner_join(cp_temp, by = "date") %>% 
+  group_by(year(date)) %>% 
+  summarise_all(mean)
+
+d_annual %>% 
+  ggplot(aes(temp_f_avg, co2_ppm_avg)) +
+  geom_point() +
+  geom_smooth(formula = y ~ poly(x, 2), method = "lm") +
+  ylab("Co2 (ppm)") +
+  xlab("Temp (F)") +
+  ggtitle("Co2 vs. Temperature, 1958-2020")
+
+```
+
+# Modeling
+
+This is not a serious attempt at modeling the relationship. I regress the natural log of 
+temperature on the natural log of co2 (an elasticity) and a linear time trend.
+
+```{r modeling}
+
+fit <- lm(data = d_annual, formula = log(temp_f_avg) ~ log(co2_ppm_avg) + year(date))
+summary(fit)
+
+pred <- d_annual %>% mutate(pred = predict(fit, newdata = d_annual))
+
+ggplot() + geom_point(data = d_annual, aes(x = date, y = temp_f_avg)) + 
+  geom_line(data = pred, aes(x = date, y = exp(pred)), color = "red") +
+  labs(subtitle = paste0("temp ~ intercept + b1 * co2 + b2 * year + e \n", 
+  "Adjusted R2: ", summary(fit)$adj.r.squared %>% round(3))) +
+  ylab("Temp (F)") +
+  xlab("Date") +
+  ggtitle("Central Park Annual Avg Temp & Fitted Regression Line, 1958-2020")
+```
+
+Indeed, there is a relationship between annual average central park temperatures and Co2 emissions.
